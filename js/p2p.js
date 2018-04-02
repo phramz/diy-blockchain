@@ -129,6 +129,11 @@ const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
               let blocks = []
               while (block !== null) {
                 blocks.push(block)
+                if (blocks.length >= 5) {
+                  this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_BLOCKS, 'arg': blocks}))
+                  blocks = []
+                }
+
                 block = blockchain.get(block.previous)
               }
 
@@ -158,9 +163,8 @@ const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
             let raw = message.data.toString()
             let newBlock = JSON.parse(raw)
 
-            if (blockchain.isOrphaned(newBlock)) {
+            if (blockchain.isOrphaned(newBlock) && this.isConnected()) {
               this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_GET_BLOCK, 'arg': newBlock.hash, 'last': blockchain.last().hash}))
-              return
             }
 
             blockchain.add(newBlock, true)
