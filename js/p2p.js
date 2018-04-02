@@ -1,11 +1,12 @@
 'use strict'
 
+require('events').EventEmitter.defaultMaxListeners = 20
+
 const output = require('./output')
 const blockchain = require('./blockchain')
 const txpool = require('./txpool')
 const IPFS = require('ipfs')
 const pubsub = require('ipfs-pubsub-room')
-require('events').EventEmitter.defaultMaxListeners = 15
 
 const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
   return {

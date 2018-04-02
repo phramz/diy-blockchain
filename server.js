@@ -37,5 +37,4 @@ setInterval(function () {
 diy.p2p.connect()
 
 // start mining
-diy.miner.IDLE_WAIT = 1
 diy.miner.start()
