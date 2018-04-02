@@ -74,7 +74,7 @@ const blockchain = (function (output, crypto, fixture, block, txpool, tx) {
       } else {
         // check target difficulty
         let targetDiff = this.targetDifficulty(previousBlock)
-        if (targetDiff > 0 && targetDiff !== newBlock.target) {
+        if (targetDiff !== false && targetDiff > 0 && targetDiff !== newBlock.target) {
           output.log('[blockchain] wrong block target difficulty! expected ' + targetDiff + ', got ' + newBlock.target)
           return this.STATE_NOK
         }
@@ -173,7 +173,7 @@ const blockchain = (function (output, crypto, fixture, block, txpool, tx) {
     targetDifficulty: function (lastBlock) {
       let previousBlock = this.get(lastBlock.previous)
       if (previousBlock === null) {
-        return lastBlock.target
+        return false
       }
 
       let took = lastBlock.time - previousBlock.time

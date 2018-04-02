@@ -129,15 +129,25 @@ const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
               let blocks = []
               while (block !== null) {
                 blocks.push(block)
-                if (blocks.length >= 5) {
-                  this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_BLOCKS, 'arg': blocks}))
-                  blocks = []
-                }
 
                 block = blockchain.get(block.previous)
               }
 
-              this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_BLOCKS, 'arg': blocks}))
+              blocks.sort(function (left, right) {
+                return left.height - right.height
+              })
+
+              let buffer = []
+              blocks.forEach(function (block) {
+                buffer.push(block)
+
+                if (buffer.length >= 5) {
+                  this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_BLOCKS, 'arg': buffer}))
+                  buffer = []
+                }
+              }.bind(this))
+
+              this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_BLOCKS, 'arg': buffer}))
             }
 
             if (this.MSG_BLOCKS === request.type) {
