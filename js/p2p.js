@@ -6,23 +6,17 @@ const output = require('./output')
 const blockchain = require('./blockchain')
 const txpool = require('./txpool')
 const IPFS = require('ipfs')
+const JsonRPC = require('simple-jsonrpc-js')
 const pubsub = require('ipfs-pubsub-room')
 
-const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
-  return {
-    MSG_GET_BLOCK: 'get_block',
-    MSG_BLOCKS: 'blocks',
+const p2p = (function (output, IPFS, JsonRPC, pubsub, blockchain, txpool) {
+  const ROOM_NAME = 'blockchain-diy'
 
-    ROOM_TX: 'blockchain-diy-tx',
-    ROOM_BLOCKS: 'blockchain-diy-blocks',
-    ROOM_SYNC: 'blockchain-diy-sync',
+  return {
     ipfs: null,
-    roomTx: null,
-    roomBlocks: null,
-    roomSync: null,
-    initState: {
-      'ipfs': false
-    },
+    room: null,
+    jrpc: null,
+    peerId: null,
 
     connect: function (network) {
       if (this.isConnected()) {
@@ -30,9 +24,6 @@ const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
       }
 
       network = network || 'main'
-
-      this.initState = {}
-      this.initState['ipfs'] = false
 
       // '/dns4/ws-star.discovery.libp2p.io/tcp/443/wss/p2p-websocket-star'
       this.ipfs = new IPFS({
@@ -49,36 +40,89 @@ const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
         repo: 'ipfs/diy-blockchain/' + String(Math.random() + Date.now())
       })
 
-      let peerId = null
+      this.jrpc = new JsonRPC()
+      let initJsonRPC = function () {
+        this.jrpc.toStream = function (message) {
+          this.room.broadcast(message)
+        }.bind(this)
+
+        this.jrpc.on('newBlock', ['block', 'from'], function (newBlock, from) {
+          try {
+            output.log('[p2p] received new block from ' + from)
+
+            if (newBlock.height > 0 && blockchain.isOrphaned(newBlock) && p2p.isConnected()) {
+              this.jrpc.call('getBlocks', {'fromHash': newBlock.hash, from: this.peerId}).then(function (blocks) {
+                blocks.forEach(function (newBlock) {
+                  blockchain.add(newBlock, true)
+                })
+              })
+            }
+
+            blockchain.add(newBlock, true)
+          } catch (ex) {
+            output.alert('[p2p] ' + ex.toString())
+            console.log(ex)
+          }
+        }.bind(this))
+
+        this.jrpc.on('newTx', ['tx', 'from'], function (newTx, from) {
+          output.log('[p2p] received new transaction from ' + from)
+
+          txpool.add(newTx, true)
+        })
+
+        this.jrpc.on('getBlocks', ['fromHash', 'from'], function (fromHash, from) {
+          output.log('[p2p] got sync request from ' + from)
+
+          let block = blockchain.get(fromHash)
+          let blocks = []
+          while (block !== null) {
+            blocks.push(block)
+            block = blockchain.get(block.previous)
+
+            if (blocks.length >= 20) {
+              break
+            }
+          }
+
+          blocks.sort(function (left, right) {
+            return left.height - right.height
+          })
+
+          return blocks
+        })
+      }.bind(this)
+
+      this.peerId = null
       this.ipfs.once('ready', function () {
         let initRoom = function (roomName, msgHandler) {
-          this.initState[roomName] = false
           let newRoom = pubsub(this.ipfs, roomName)
           newRoom.on('peer joined', function (peer) {
-            if (peer === peerId) {
+            if (peer === this.peerId) {
               return
             }
 
             output.log('[p2p] peer ' + peer + ' joined ' + roomName)
-          })
+          }.bind(this))
           newRoom.on('peer left', function (peer) {
-            if (peer === peerId) {
+            if (peer === this.peerId) {
               return
             }
 
             output.log('[p2p] peer ' + peer + ' unsubscribed ' + roomName)
-          })
-          newRoom.on('subscribed', function () {
-            this.initState[roomName] = true
-            output.log('[p2p] subscribed to ' + roomName)
           }.bind(this))
+          newRoom.on('subscribed', function () {
+            initJsonRPC()
+
+            output.log('[p2p] subscribed to ' + roomName)
+          })
           newRoom.on('message', function (message) {
-            if (message.from === peerId) {
+            if (message.from === this.peerId) {
               return
             }
 
             msgHandler(message)
-          })
+          }.bind(this))
 
           return newRoom
         }.bind(this)
@@ -94,93 +138,15 @@ const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
             return
           }
 
-          peerId = identity.id
-          this.initState['ipfs'] = true
-          output.log('[p2p] connected with peer id ' + peerId)
+          this.peerId = identity.id
+          output.log('[p2p] connected with peer id ' + this.peerId)
         }.bind(this))
 
-        // connect to blockchain-diy-tx
-        this.roomTx = initRoom(this.ROOM_TX + '-' + network, function (message) {
-          output.log('[p2p] received new transaction from ' + message.from)
-
+        this.room = initRoom(ROOM_NAME + '-' + network, function (message) {
           try {
-            let newTx = JSON.parse(message.data.toString())
-            txpool.add(newTx, true)
+            this.jrpc.messageHandler(message.data.toString())
           } catch (ex) {
             output.alert('[p2p] ' + ex.toString())
-          }
-        })
-
-        // connect to blockchain-diy-sync
-        this.roomSync = initRoom(this.ROOM_SYNC + '-' + network, function (message) {
-          try {
-            let raw = message.data.toString()
-            let request = JSON.parse(raw)
-
-            if (this.MSG_GET_BLOCK === request.type) {
-              output.log('[p2p] got sync request from ' + message.from)
-
-              let last = request.last || null
-              if (last !== null && !blockchain.has(last)) {
-                this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_GET_BLOCK, 'arg': last}))
-              }
-
-              let block = blockchain.get(request.arg)
-              let blocks = []
-              while (block !== null) {
-                blocks.push(block)
-
-                block = blockchain.get(block.previous)
-              }
-
-              blocks.sort(function (left, right) {
-                return left.height - right.height
-              })
-
-              let buffer = []
-              blocks.forEach(function (block) {
-                buffer.push(block)
-
-                if (buffer.length >= 5) {
-                  this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_BLOCKS, 'arg': buffer}))
-                  buffer = []
-                }
-              }.bind(this))
-
-              this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_BLOCKS, 'arg': buffer}))
-            }
-
-            if (this.MSG_BLOCKS === request.type) {
-              request.arg.sort(function (left, right) {
-                return left.height - right.height
-              })
-
-              request.arg.forEach(function (block) {
-                blockchain.add(block, true)
-              })
-            }
-          } catch (ex) {
-            output.alert('[p2p] ' + ex.toString())
-            console.log(ex)
-          }
-        }.bind(this))
-
-        // connect to blockchain-diy-blocks
-        this.roomBlocks = initRoom(this.ROOM_BLOCKS + '-' + network, function (message) {
-          try {
-            output.log('[p2p] received new block from ' + message.from)
-
-            let raw = message.data.toString()
-            let newBlock = JSON.parse(raw)
-
-            if (blockchain.isOrphaned(newBlock) && this.isConnected()) {
-              this.roomSync.sendTo(message.from, JSON.stringify({'type': this.MSG_GET_BLOCK, 'arg': newBlock.hash, 'last': blockchain.last().hash}))
-            }
-
-            blockchain.add(newBlock, true)
-          } catch (ex) {
-            output.alert('[p2p] ' + ex.toString())
-            console.log(ex)
           }
         }.bind(this))
       }.bind(this))
@@ -197,18 +163,13 @@ const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
         })
       } catch (ex) { }
 
-      this.initState = {}
-      this.initState['ipfs'] = false
       this.ipfs = null
+      this.room = null
+      this.jrpc = null
     },
 
     isConnected: function () {
-      let result = true
-      Object.keys(this.initState).forEach(function (key) {
-        result = result && this.initState[key]
-      }.bind(this))
-
-      return result
+      return this.room !== null && this.ipfs !== null && this.jrpc !== null
     },
 
     broadcastBlock: function (block) {
@@ -218,7 +179,7 @@ const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
       }
 
       output.log('[p2p] broadcasting block ' + block.hash)
-      this.roomBlocks.broadcast(JSON.stringify(block))
+      this.jrpc.notification('newBlock', {block: block, from: this.peerId})
     },
 
     broadcastTx: function (tx) {
@@ -228,10 +189,10 @@ const p2p = (function (output, IPFS, pubsub, blockchain, txpool) {
       }
 
       output.log('[p2p] broadcasting transaction ' + tx.id)
-      this.roomTx.broadcast(JSON.stringify(tx))
+      this.jrpc.notification('newTx', {tx: tx, from: this.peerId})
     }
 
   }
-})(output, IPFS, pubsub, blockchain, txpool)
+})(output, IPFS, JsonRPC, pubsub, blockchain, txpool)
 
 module.exports = p2p
