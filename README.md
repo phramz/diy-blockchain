@@ -66,6 +66,11 @@ This project heavily depends on awesome stuff from ...
 
 cheerz!
 
+## Misc
+
+### techcamp.hamburg 2018
+https://www.slideshare.net/MaximilianReichel/diyblockchain
+
 ## License
 
 MIT License
